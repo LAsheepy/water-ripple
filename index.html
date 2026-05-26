@@ -119,7 +119,7 @@
                 float nextC = c * 2.0 - p + laplacian * 1.8;
 
                 // Non-linear damping (small ripples die faster)
-                float damp = mix(0.96, 0.995, smoothstep(0.0, 0.2, abs(c)));
+                float damp = mix(0.93, 0.97, smoothstep(0.0, 0.2, abs(c)));
                 nextC *= damp;
 
                 // Apply forces from fingertips
