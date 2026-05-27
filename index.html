@@ -136,9 +136,9 @@
                     vec2 a = vec2(line.x * u_aspect, line.y);
                     vec2 b2 = vec2(line.z * u_aspect, line.w);
                     
-                    float d = sdCapsule(p_uv, a, b2, 0.015);
-                    // Force profile
-                    float f = smoothstep(0.02, 0.0, d) * 0.08;
+                    float d = sdCapsule(p_uv, a, b2, 0.008);
+                    // Force profile (sharper edge, slightly stronger)
+                    float f = smoothstep(0.012, 0.0, d) * 0.09;
                     force += f * isActive;
                 }
 
@@ -180,7 +180,7 @@
 
                 // Normal calculation
                 vec2 grad = vec2(h_r - h_l, h_u - h_d) * 0.5;
-                vec3 normal = normalize(vec3(grad.x * u_aspect, grad.y, 0.08));
+                vec3 normal = normalize(vec3(grad.x * u_aspect, grad.y, 0.12));
 
                 // Laplacian for lens magnification effect
                 float lap = (h_r + h_l + h_u + h_d) - 4.0 * h;
@@ -191,7 +191,7 @@
                 camUV.x = mix(camUV.x, 1.0 - camUV.x, u_isMirrored);
 
                 // Refraction offset based on normal and lens curvature
-                vec2 refrOffset = normal.xy * u_refraction - normal.xy * lap * 0.3;
+                vec2 refrOffset = normal.xy * u_refraction - normal.xy * lap * 0.15;
                 refrOffset.x *= mix(1.0, -1.0, u_isMirrored); // Correct offset direction if mirrored
 
                 // Chromatic Aberration
@@ -230,10 +230,10 @@
                 
                 // Combine
                 float waveIntensity = smoothstep(0.01, 0.1, abs(h));
-                vec3 finalColor = mix(bgColor, bgColor * depthColor * 1.35, waveIntensity * 0.45);
+                vec3 finalColor = mix(bgColor, bgColor * depthColor * 1.15, waveIntensity * 0.35);
 
-                finalColor += vec3(specular) * 0.5;
-                finalColor += vec3(fresnel) * u_specularInt * 0.15;
+                finalColor += vec3(specular) * 0.35;
+                finalColor += vec3(fresnel) * u_specularInt * 0.08;
 
                 gl_FragColor = vec4(finalColor, 1.0);
             }
@@ -262,7 +262,9 @@
             // Hand Tracking
             hands: null,
             fingertips: [], // Current frame tips
-            prevFingertips: [], // Previous frame tips for lines
+            tipHistory: [],     // Recent fingertip positions for trail effect
+            pointerHistory: [], // Recent pointer positions for trail effect
+            MAX_TRAIL_AGE: 3,   // How many frames of history to keep
             
             // Modes
             modes: {
@@ -315,13 +317,16 @@
                 window.addEventListener('pointerdown', e => {
                     this.isPointerDown = true;
                     this.pointerPos = {x: e.clientX / window.innerWidth, y: e.clientY / window.innerHeight};
-                    this.prevPointerPos = {...this.pointerPos};
+                    this.pointerHistory = [{...this.pointerPos}];
                 });
                 window.addEventListener('pointermove', e => {
                     if (!this.isPointerDown) return;
                     this.pointerPos = {x: e.clientX / window.innerWidth, y: e.clientY / window.innerHeight};
                 });
-                window.addEventListener('pointerup', () => this.isPointerDown = false);
+                window.addEventListener('pointerup', () => {
+                    this.isPointerDown = false;
+                    this.pointerHistory = [];
+                });
             },
 
             showError(msg) {
@@ -497,7 +502,12 @@
                             });
                         }
                     }
-                    this.prevFingertips = this.fingertips.length > 0 ? this.fingertips : newTips;
+                    if (newTips.length > 0) {
+                        this.tipHistory.unshift([...newTips]);
+                        if (this.tipHistory.length > this.MAX_TRAIL_AGE) this.tipHistory.pop();
+                    } else {
+                        this.tipHistory = [];
+                    }
                     this.fingertips = newTips;
                 });
 
@@ -593,27 +603,45 @@
                 gl.uniform2f(gl.getUniformLocation(this.programs.sim, "u_resolution"), this.fbos[0].width, this.fbos[0].height);
                 gl.uniform1f(gl.getUniformLocation(this.programs.sim, "u_aspect"), this.canvas.width / this.canvas.height);
 
-                // Build Lines Array
-                const linesData = new Float32Array(40); // 10 lines * 4 floats
-                let lineCount = Math.min(this.fingertips.length, 10);
-                
-                for(let i=0; i<lineCount; i++) {
-                    let p1 = this.prevFingertips[i] || this.fingertips[i];
-                    let p2 = this.fingertips[i];
-                    linesData[i*4 + 0] = p1.x;
-                    linesData[i*4 + 1] = 1.0 - p1.y; // WebGL Y is flipped
-                    linesData[i*4 + 2] = p2.x;
-                    linesData[i*4 + 3] = 1.0 - p2.y;
+                // Update pointer history for trail effect
+                if (this.isPointerDown) {
+                    this.pointerHistory.unshift({...this.pointerPos});
+                    if (this.pointerHistory.length > this.MAX_TRAIL_AGE) this.pointerHistory.pop();
+                } else {
+                    this.pointerHistory = [];
                 }
 
-                // Add pointer fallback if active and we have room
+                // Build Lines Array from history for trail persistence
+                const linesData = new Float32Array(40); // 10 lines * 4 floats
+                let lineCount = 0;
+
+                const tipFrames = [this.fingertips, ...this.tipHistory];
+                for (let f = 0; f < tipFrames.length - 1 && lineCount < 10; f++) {
+                    const curr = tipFrames[f];
+                    const prev = tipFrames[f + 1];
+                    for (let i = 0; i < curr.length && lineCount < 10; i++) {
+                        if (prev[i]) {
+                            linesData[lineCount*4 + 0] = prev[i].x;
+                            linesData[lineCount*4 + 1] = 1.0 - prev[i].y;
+                            linesData[lineCount*4 + 2] = curr[i].x;
+                            linesData[lineCount*4 + 3] = 1.0 - curr[i].y;
+                            lineCount++;
+                        }
+                    }
+                }
+
+                // Add pointer fallback trails if room remains
                 if (this.isPointerDown && lineCount < 10) {
-                    linesData[lineCount*4 + 0] = this.prevPointerPos.x;
-                    linesData[lineCount*4 + 1] = 1.0 - this.prevPointerPos.y;
-                    linesData[lineCount*4 + 2] = this.pointerPos.x;
-                    linesData[lineCount*4 + 3] = 1.0 - this.pointerPos.y;
-                    lineCount++;
-                    this.prevPointerPos = {...this.pointerPos};
+                    const ptrFrames = [this.pointerPos, ...this.pointerHistory];
+                    for (let f = 0; f < ptrFrames.length - 1 && lineCount < 10; f++) {
+                        const curr = ptrFrames[f];
+                        const prev = ptrFrames[f + 1];
+                        linesData[lineCount*4 + 0] = prev.x;
+                        linesData[lineCount*4 + 1] = 1.0 - prev.y;
+                        linesData[lineCount*4 + 2] = curr.x;
+                        linesData[lineCount*4 + 3] = 1.0 - curr.y;
+                        lineCount++;
+                    }
                 }
                 
                 gl.uniform4fv(gl.getUniformLocation(this.programs.sim, "u_lines"), linesData);
@@ -627,9 +655,6 @@
 
                 // Advance FBO
                 this.currentFBO = (this.currentFBO + 1) % 3;
-                
-                // Keep prevFingertips updated for next frame
-                this.prevFingertips = [...this.fingertips];
 
                 // --- PASS 2: Render to Screen ---
                 gl.bindFramebuffer(gl.FRAMEBUFFER, null);
